@@ -13,7 +13,6 @@
 // limitations under the License.
 
 import {logger as defaultLogger, Logger} from './logger';
-import {parse} from 'node-html-parser';
 import {Version} from '../version';
 
 const DEFAULT_HEADER = ':robot: I have created a release *beep* *boop*';
@@ -116,41 +115,103 @@ function splitBody(
 
 const SUMMARY_PATTERN = /^(?<component>.*[^:]):? (?<version>\d+\.\d+\.\d+.*)$/;
 const COMPONENTLESS_SUMMARY_PATTERN = /^(?<version>\d+\.\d+\.\d+.*)$/;
+// Each component's release notes are wrapped in a section that release-please
+// itself emits (see `PullRequestBody.notes()`):
+//
+//   <details><summary>{component}: {version}</summary>
+//
+//   {notes}
+//   </details>
+//
+// The notes are markdown built from commit messages (or a custom
+// changelog-notes implementation) and can contain anything, including raw
+// HTML-looking tokens such as `<path>` or `<details>` in inline code spans.
+// The body is therefore deliberately NOT parsed as HTML: a lenient HTML
+// parser lets an unbalanced tag in one section's notes swallow or hide the
+// sibling sections that follow it. Only the markers above are structural;
+// everything between them is taken verbatim, so the notes survive a
+// parse/toString round trip unchanged.
+const SECTION_START_PATTERN =
+  /^<details>\s*<summary>(?<summary>[^\n]*?)<\/summary>/gm;
+const SECTION_END_MARKER = '</details>';
 export interface ReleaseData {
   component?: string;
   version?: Version;
   notes: string;
 }
-function extractMultipleReleases(notes: string, logger: Logger): ReleaseData[] {
-  const data: ReleaseData[] = [];
-  const root = parse(notes);
-  for (const detail of root.getElementsByTagName('details')) {
-    const summaryNode = detail.getElementsByTagName('summary')[0];
-    const summary = summaryNode?.textContent;
-    const match = summary.match(SUMMARY_PATTERN);
-    if (match?.groups) {
-      detail.removeChild(summaryNode);
-      const notes = detail.textContent.trim();
-      data.push({
-        component: match.groups.component,
-        version: Version.parse(match.groups.version),
-        notes,
-      });
-    } else {
-      const componentlessMatch = summary.match(COMPONENTLESS_SUMMARY_PATTERN);
-      if (!componentlessMatch?.groups) {
-        logger.warn(`Summary: ${summary} did not match the expected pattern`);
-        continue;
-      }
-      detail.removeChild(summaryNode);
-      const notes = detail.textContent.trim();
-      data.push({
-        version: Version.parse(componentlessMatch.groups.version),
-        notes,
-      });
+interface SectionStart {
+  /** Offset of the section's `<details>` marker within the content. */
+  index: number;
+  /** Offset of the first character after the section's `</summary>`. */
+  notesIndex: number;
+  summary: string;
+  component?: string;
+  version: Version;
+}
+function extractMultipleReleases(
+  content: string,
+  logger: Logger
+): ReleaseData[] {
+  const starts = findSectionStarts(content, logger);
+  return starts.map((start, i) => {
+    // A section's notes run up to the last closing marker before the next
+    // section starts (or before the end of the content). Taking the last
+    // marker rather than the first means a stray `</details>` inside the
+    // notes cannot truncate them.
+    const limit = i + 1 < starts.length ? starts[i + 1].index : content.length;
+    const span = content.slice(start.notesIndex, limit);
+    const end = span.lastIndexOf(SECTION_END_MARKER);
+    if (end === -1) {
+      logger.warn(
+        `Missing closing ${SECTION_END_MARKER} for summary: ${start.summary}`
+      );
     }
+    const notes = (end === -1 ? span : span.slice(0, end)).trim();
+    return start.component
+      ? {component: start.component, version: start.version, notes}
+      : {version: start.version, notes};
+  });
+}
+function findSectionStarts(content: string, logger: Logger): SectionStart[] {
+  const starts: SectionStart[] = [];
+  // Copy the pattern so the global regex's lastIndex is never shared
+  // between calls.
+  const pattern = new RegExp(SECTION_START_PATTERN);
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(content)) !== null) {
+    const summary = match.groups!.summary;
+    const parsed = parseSummary(summary);
+    if (!parsed) {
+      // Not a section release-please emitted (for example a collapsible
+      // block that a custom changelog put inside the notes): treat it as
+      // plain text belonging to the enclosing section.
+      logger.warn(`Summary: ${summary} did not match the expected pattern`);
+      continue;
+    }
+    starts.push({
+      index: match.index,
+      notesIndex: match.index + match[0].length,
+      summary,
+      ...parsed,
+    });
   }
-  return data;
+  return starts;
+}
+function parseSummary(
+  summary: string
+): {component?: string; version: Version} | undefined {
+  const match = summary.match(SUMMARY_PATTERN);
+  if (match?.groups) {
+    return {
+      component: match.groups.component,
+      version: Version.parse(match.groups.version),
+    };
+  }
+  const componentlessMatch = summary.match(COMPONENTLESS_SUMMARY_PATTERN);
+  if (componentlessMatch?.groups) {
+    return {version: Version.parse(componentlessMatch.groups.version)};
+  }
+  return undefined;
 }
 const COMPARE_REGEX = /^#{2,} \[?(?<version>\d+\.\d+\.\d+[^\]]*)\]?/;
 function extractSingleRelease(body: string, logger: Logger): ReleaseData[] {

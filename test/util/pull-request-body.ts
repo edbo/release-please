@@ -135,6 +135,178 @@ describe('PullRequestBody', () => {
       expect(releaseData[0].version?.toString()).to.eql('0.1.0');
       expect(releaseData[0].notes).matches(/initial generation/);
     });
+
+    // The manifest re-serializes each merged release pull request body
+    // (PullRequestBody.parse(...).toString()) before every strategy parses
+    // it again, so escaped html must survive the round trip unchanged.
+    // https://github.com/googleapis/release-please/issues/2899
+    it('should preserve escaped html through a parse/toString round trip', () => {
+      const body = [
+        ':robot: I have created a release *beep* *boop*',
+        '---',
+        '',
+        '',
+        '<details><summary>pkg-a: 1.0.1</summary>\n\n### Features\n\n* claim :v&lt;version&gt; only on main\n</details>',
+        '',
+        '<details><summary>pkg-b: 2.0.1</summary>\n\n### Features\n\n* claim :v&lt;version&gt; only on main\n</details>',
+        '',
+        '<details><summary>pkg-c: 3.0.1</summary>\n\n### Features\n\n* unrelated\n</details>',
+        '',
+        '---',
+        'This PR was generated with [Release Please](https://github.com/googleapis/release-please). See [documentation](https://github.com/googleapis/release-please#release-please).',
+      ].join('\n');
+      const pullRequestBody = PullRequestBody.parse(body);
+      expect(pullRequestBody).to.not.be.undefined;
+      const releaseData = pullRequestBody!.releaseData;
+      expect(releaseData.map(data => data.component)).to.eql([
+        'pkg-a',
+        'pkg-b',
+        'pkg-c',
+      ]);
+      expect(releaseData[0].notes).to.eql(
+        '### Features\n\n* claim :v&lt;version&gt; only on main'
+      );
+      const reparsed = PullRequestBody.parse(pullRequestBody!.toString());
+      expect(reparsed).to.not.be.undefined;
+      expect(reparsed!.releaseData).to.eql(releaseData);
+      expect(reparsed!.toString()).to.eql(pullRequestBody!.toString());
+    });
+
+    // htmlEscape() intentionally leaves `<`/`>` alone inside inline code
+    // spans, so a raw html-looking token can reach the notes.
+    // https://github.com/googleapis/release-please/issues/2801
+    it('should not let a raw html tag inside notes hide later components', () => {
+      const body = [
+        ':robot: I have created a release *beep* *boop*',
+        '---',
+        '',
+        '',
+        '<details><summary>pkg-a: 1.0.0</summary>\n\n### Features\n\n* add `--report <path>` flag\n</details>',
+        '',
+        '<details><summary>pkg-b: 2.0.0</summary>\n\n### Features\n\n* add `--report <path>` flag\n</details>',
+        '',
+        '---',
+        'This PR was generated with [Release Please](https://github.com/googleapis/release-please). See [documentation](https://github.com/googleapis/release-please#release-please).',
+      ].join('\n');
+      const pullRequestBody = PullRequestBody.parse(body);
+      expect(pullRequestBody).to.not.be.undefined;
+      const releaseData = pullRequestBody!.releaseData;
+      expect(releaseData.map(data => data.component)).to.eql([
+        'pkg-a',
+        'pkg-b',
+      ]);
+      expect(releaseData[0].notes).to.eql(
+        '### Features\n\n* add `--report <path>` flag'
+      );
+      expect(releaseData[1].notes).to.eql(
+        '### Features\n\n* add `--report <path>` flag'
+      );
+    });
+
+    // https://github.com/googleapis/release-please/issues/2884
+    it('should not treat a raw <details> token inside notes as a section', () => {
+      const body = [
+        ':robot: I have created a release *beep* *boop*',
+        '---',
+        '',
+        '',
+        '## [0.9.1](https://github.com/example/repo/compare/v0.9.0...v0.9.1) (2026-08-22)',
+        '',
+        '',
+        '### Bug Fixes',
+        '',
+        '* escape an unbalanced `<details>` tag instead of refusing the draft ([#133](https://github.com/example/repo/issues/133))',
+        '',
+        '---',
+        'This PR was generated with [Release Please](https://github.com/googleapis/release-please). See [documentation](https://github.com/googleapis/release-please#release-please).',
+      ].join('\n');
+      const pullRequestBody = PullRequestBody.parse(body);
+      expect(pullRequestBody).to.not.be.undefined;
+      const releaseData = pullRequestBody!.releaseData;
+      expect(releaseData).lengthOf(1);
+      expect(releaseData[0].component).to.be.undefined;
+      expect(releaseData[0].version?.toString()).to.eql('0.9.1');
+      expect(releaseData[0].notes).matches(/^## \[0\.9\.1\]/);
+      expect(releaseData[0].notes).to.include(
+        '* escape an unbalanced `<details>` tag instead of refusing the draft'
+      );
+    });
+
+    it('should not end a section at a stray </details> inside notes', () => {
+      const body = [
+        ':robot: I have created a release *beep* *boop*',
+        '---',
+        '',
+        '',
+        '<details><summary>pkg-a: 1.0.0</summary>\n\n### Bug Fixes\n\n* mention `</details>` handling\n* another fix\n</details>',
+        '',
+        '<details><summary>pkg-b: 2.0.0</summary>\n\n### Bug Fixes\n\n* unrelated\n</details>',
+        '',
+        '---',
+        'This PR was generated with [Release Please](https://github.com/googleapis/release-please). See [documentation](https://github.com/googleapis/release-please#release-please).',
+      ].join('\n');
+      const pullRequestBody = PullRequestBody.parse(body);
+      expect(pullRequestBody).to.not.be.undefined;
+      const releaseData = pullRequestBody!.releaseData;
+      expect(releaseData.map(data => data.component)).to.eql([
+        'pkg-a',
+        'pkg-b',
+      ]);
+      expect(releaseData[0].notes).to.eql(
+        '### Bug Fixes\n\n* mention `</details>` handling\n* another fix'
+      );
+      expect(releaseData[1].notes).to.eql('### Bug Fixes\n\n* unrelated');
+    });
+
+    it('should keep a nested collapsible block inside the notes', () => {
+      const body = [
+        ':robot: I have created a release *beep* *boop*',
+        '---',
+        '',
+        '',
+        '<details><summary>pkg-a: 1.0.0</summary>\n\n### Features\n\n* a feature\n\n<details><summary>Full diff</summary>\n\nsome diff\n</details>\n</details>',
+        '',
+        '<details><summary>pkg-b: 2.0.0</summary>\n\n### Features\n\n* unrelated\n</details>',
+        '',
+        '---',
+        'This PR was generated with [Release Please](https://github.com/googleapis/release-please). See [documentation](https://github.com/googleapis/release-please#release-please).',
+      ].join('\n');
+      const pullRequestBody = PullRequestBody.parse(body);
+      expect(pullRequestBody).to.not.be.undefined;
+      const releaseData = pullRequestBody!.releaseData;
+      expect(releaseData.map(data => data.component)).to.eql([
+        'pkg-a',
+        'pkg-b',
+      ]);
+      expect(releaseData[0].notes).to.eql(
+        '### Features\n\n* a feature\n\n<details><summary>Full diff</summary>\n\nsome diff\n</details>'
+      );
+      expect(releaseData[1].notes).to.eql('### Features\n\n* unrelated');
+    });
+
+    it('should tolerate a section without a closing marker', () => {
+      const body = [
+        ':robot: I have created a release *beep* *boop*',
+        '---',
+        '',
+        '',
+        '<details><summary>pkg-a: 1.0.0</summary>\n\n### Features\n\n* a feature\n</details>',
+        '',
+        '<details><summary>pkg-b: 2.0.0</summary>\n\n### Features\n\n* unrelated',
+        '',
+        '---',
+        'This PR was generated with [Release Please](https://github.com/googleapis/release-please). See [documentation](https://github.com/googleapis/release-please#release-please).',
+      ].join('\n');
+      const pullRequestBody = PullRequestBody.parse(body);
+      expect(pullRequestBody).to.not.be.undefined;
+      const releaseData = pullRequestBody!.releaseData;
+      expect(releaseData.map(data => data.component)).to.eql([
+        'pkg-a',
+        'pkg-b',
+      ]);
+      expect(releaseData[0].notes).to.eql('### Features\n\n* a feature');
+      expect(releaseData[1].notes).to.eql('### Features\n\n* unrelated');
+    });
   });
   describe('toString', () => {
     it('can handle multiple entries', () => {
