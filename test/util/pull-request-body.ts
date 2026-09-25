@@ -136,10 +136,6 @@ describe('PullRequestBody', () => {
       expect(releaseData[0].notes).matches(/initial generation/);
     });
 
-    // The manifest re-serializes each merged release pull request body
-    // (PullRequestBody.parse(...).toString()) before every strategy parses
-    // it again, so escaped html must survive the round trip unchanged.
-    // https://github.com/googleapis/release-please/issues/2899
     it('should preserve escaped html through a parse/toString round trip', () => {
       const body = [
         ':robot: I have created a release *beep* *boop*',
@@ -172,9 +168,6 @@ describe('PullRequestBody', () => {
       expect(reparsed!.toString()).to.eql(pullRequestBody!.toString());
     });
 
-    // htmlEscape() intentionally leaves `<`/`>` alone inside inline code
-    // spans, so a raw html-looking token can reach the notes.
-    // https://github.com/googleapis/release-please/issues/2801
     it('should not let a raw html tag inside notes hide later components', () => {
       const body = [
         ':robot: I have created a release *beep* *boop*',
@@ -203,7 +196,6 @@ describe('PullRequestBody', () => {
       );
     });
 
-    // https://github.com/googleapis/release-please/issues/2884
     it('should not treat a raw <details> token inside notes as a section', () => {
       const body = [
         ':robot: I have created a release *beep* *boop*',

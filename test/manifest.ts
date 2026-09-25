@@ -5106,12 +5106,6 @@ describe('Manifest', () => {
     });
 
     it('should build a release for every component when notes contain escaped html', async () => {
-      // A commit subject containing `<version>` is escaped to
-      // `&lt;version&gt;` in the pull request body. The merged body is
-      // parsed and re-serialized by the manifest, then parsed again by each
-      // strategy: that round trip must not decode the escaping and hide
-      // the components that follow.
-      // https://github.com/googleapis/release-please/issues/2899
       const notes = '### Features\n\n* claim :v&lt;version&gt; only on main';
       const body = new PullRequestBody([
         {component: 'pkg1', version: Version.parse('1.0.1'), notes},
